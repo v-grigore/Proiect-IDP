@@ -2,7 +2,7 @@
 Ticketing Service - Managementul evenimentelor și biletelor
 Integrare cu Keycloak pentru SSO și RBAC
 """
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
 import os
@@ -14,6 +14,20 @@ import secrets
 import pika
 import json
 import time
+import redis
+
+from rate_limiter import (
+    InMemorySlidingWindowRateLimiter,
+    RedisSlidingWindowRateLimiter,
+    RateLimiterBackendUnavailable,
+)
+from cache import (
+    RedisJsonCache,
+    CacheBackendUnavailable,
+    cache_enabled,
+    cache_ttl_seconds,
+    make_cache_key,
+)
 
 app = Flask(__name__)
 CORS(app)
@@ -33,6 +47,51 @@ KEYCLOAK_CLIENT_ID = os.getenv('KEYCLOAK_CLIENT_ID', 'eventflow-api')
 KEYCLOAK_PUBLIC_URL = os.getenv('KEYCLOAK_PUBLIC_URL', KEYCLOAK_URL)
 
 db = SQLAlchemy(app)
+
+def _build_redis_client():
+    redis_url = os.getenv('REDIS_URL', '').strip()
+    if not redis_url:
+        return None
+    return redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_timeout=1,
+        socket_connect_timeout=1,
+    )
+
+
+REDIS_CLIENT = _build_redis_client()
+
+
+def _build_rate_limiter():
+    backend = os.getenv('RATE_LIMIT_BACKEND', '').strip().lower()
+
+    # If Redis is configured (as in Docker Swarm stack), default to Redis backend.
+    if not backend:
+        backend = 'redis' if REDIS_CLIENT is not None else 'memory'
+
+    if backend == 'redis':
+        if REDIS_CLIENT is None:
+            # Misconfiguration: requested redis backend but no REDIS_URL.
+            return None
+        return RedisSlidingWindowRateLimiter(REDIS_CLIENT, prefix='rl:ticketing')
+
+    # Fallback (not distributed)
+    return InMemorySlidingWindowRateLimiter()
+
+
+RATE_LIMITER = _build_rate_limiter()
+
+
+def _build_cache():
+    if not cache_enabled():
+        return None
+    if REDIS_CLIENT is None:
+        return None
+    return RedisJsonCache(REDIS_CLIENT, prefix='cache:ticketing')
+
+
+CACHE = _build_cache()
 
 
 # Models
@@ -211,12 +270,9 @@ def is_banned(sub: str) -> bool:
 
 def rate_limit(max_requests: int = 2, window_seconds: int = 60):
     """
-    Rate limiting simplu în memorie, per utilizator (keycloak_sub).
-    Pentru demo este suficient (avem un singur replica), dar în producție
-    s-ar folosi un storage partajat (Redis, etc.).
+    Rate limiting per utilizator (keycloak_sub), sliding window.
+    In Docker Swarm (cu replicare), folosim Redis ca storage partajat.
     """
-    store = {}
-
     def decorator(f):
         @wraps(f)
         def wrapped(*args, **kwargs):
@@ -224,18 +280,25 @@ def rate_limit(max_requests: int = 2, window_seconds: int = 60):
             if not user_sub:
                 return jsonify({'error': 'Missing user context for rate limiting'}), 401
 
-            now = time.time()
-            timestamps = [t for t in store.get(user_sub, []) if now - t < window_seconds]
+            if RATE_LIMITER is None:
+                return jsonify({'error': 'Rate limiter not configured'}), 503
 
-            if len(timestamps) >= max_requests:
+            # Scope limiter per endpoint as well (prevents cross-endpoint interference)
+            scope = request.path
+            key = f"{user_sub}:{scope}"
+
+            try:
+                allowed = RATE_LIMITER.allow(key, max_requests, window_seconds)
+            except RateLimiterBackendUnavailable:
+                return jsonify({'error': 'Rate limiting backend unavailable'}), 503
+
+            if not allowed:
                 return jsonify({
                     'error': 'Too many requests',
                     'limit': max_requests,
-                    'window_seconds': window_seconds
+                    'window_seconds': window_seconds,
                 }), 429
 
-            timestamps.append(now)
-            store[user_sub] = timestamps
             return f(*args, **kwargs)
 
         return wrapped
@@ -278,8 +341,29 @@ def health():
 @app.route('/events', methods=['GET'])
 def list_events():
     """Listă toate evenimentele (public)."""
+    if CACHE is not None:
+        key = make_cache_key('/events')
+        try:
+            cached = CACHE.get_json(key)
+            if cached is not None:
+                resp = make_response(jsonify(cached), 200)
+                resp.headers['X-Cache'] = 'HIT'
+                return resp
+        except CacheBackendUnavailable:
+            pass
+
     events = Event.query.order_by(Event.starts_at.asc()).all()
-    return jsonify([e.to_dict() for e in events]), 200
+    payload = [e.to_dict() for e in events]
+
+    if CACHE is not None:
+        try:
+            CACHE.set_json(key, payload, cache_ttl_seconds())
+        except CacheBackendUnavailable:
+            pass
+
+    resp = make_response(jsonify(payload), 200)
+    resp.headers['X-Cache'] = 'MISS'
+    return resp
 
 
 @app.route('/events', methods=['POST'])
@@ -316,10 +400,31 @@ def create_event():
 
 @app.route('/events/<int:event_id>', methods=['GET'])
 def get_event(event_id):
+    if CACHE is not None:
+        key = make_cache_key(f'/events/{event_id}')
+        try:
+            cached = CACHE.get_json(key)
+            if cached is not None:
+                resp = make_response(jsonify(cached), 200)
+                resp.headers['X-Cache'] = 'HIT'
+                return resp
+        except CacheBackendUnavailable:
+            pass
+
     event = Event.query.get(event_id)
     if not event:
         return jsonify({'error': 'Event not found'}), 404
-    return jsonify(event.to_dict()), 200
+
+    payload = event.to_dict()
+    if CACHE is not None:
+        try:
+            CACHE.set_json(key, payload, cache_ttl_seconds())
+        except CacheBackendUnavailable:
+            pass
+
+    resp = make_response(jsonify(payload), 200)
+    resp.headers['X-Cache'] = 'MISS'
+    return resp
 
 
 @app.route('/events/<int:event_id>', methods=['PATCH'])

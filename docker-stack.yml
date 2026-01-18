@@ -100,7 +100,7 @@ services:
     networks:
       - internal-network
     deploy:
-      replicas: 1
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
@@ -126,12 +126,16 @@ services:
       KEYCLOAK_ADMIN_PASSWORD: ${KEYCLOAK_ADMIN_PASSWORD:-admin}
       PORT: 3005
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RATE_LIMIT_BACKEND: redis
+      REDIS_URL: redis://redis:6379/0
+      CACHE_ENABLED: "1"
+      CACHE_TTL_SECONDS: "5"
     ports:
       - "3005:3005"
     networks:
       - internal-network
     deploy:
-      replicas: 1
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
@@ -162,6 +166,20 @@ services:
         constraints:
           - node.role == manager
 
+  # Redis - storage partajat pentru rate limiting distribuit
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
   # Notification Service
   notification-service:
     image: eventflow/notification-service:latest
@@ -178,7 +196,7 @@ services:
     networks:
       - internal-network
     deploy:
-      replicas: 1
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
@@ -201,7 +219,7 @@ services:
     networks:
       - internal-network
     deploy:
-      replicas: 1
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
@@ -224,7 +242,7 @@ services:
     networks:
       - internal-network
     deploy:
-      replicas: 1
+      replicas: 2
       restart_policy:
         condition: on-failure
       placement:
