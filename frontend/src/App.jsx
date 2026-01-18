@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 
 const API_BASE = 'http://localhost:3005'; // ticketing-service
 const GATE_API_BASE = 'http://localhost:3007'; // gate-service pentru scanare
+const PAYMENT_API_BASE = 'http://localhost:3008'; // payment-service pentru rezervare + plata
 const KEYCLOAK_BASE = 'http://localhost:8080/realms/eventflow/protocol/openid-connect';
 const FRONTEND_CLIENT_ID = 'eventflow-frontend';
 
@@ -69,6 +70,51 @@ export default function App() {
   const [waitlistEntries, setWaitlistEntries] = useState([]);
   const [selectedWaitlistEventId, setSelectedWaitlistEventId] = useState(null);
   const [myUserNotificationsText, setMyUserNotificationsText] = useState('');
+  const [paymentSession, setPaymentSession] = useState(null);
+  const [paymentRemainingSec, setPaymentRemainingSec] = useState(0);
+
+  function parseBackendIsoToMs(isoString) {
+    if (!isoString) return Number.NaN;
+    const s = String(isoString);
+    // If backend sends naive UTC timestamps without timezone (e.g. "2026-01-18T12:34:56.123456"),
+    // JS will treat them as local time; force UTC by appending "Z" when no timezone is present.
+    const hasTimezone = /([zZ]|[+-]\d{2}:\d{2})$/.test(s);
+    return Date.parse(hasTimezone ? s : `${s}Z`);
+  }
+
+  useEffect(() => {
+    if (!paymentSession || !paymentSession.expires_at) {
+      setPaymentRemainingSec(0);
+      return;
+    }
+
+    const expiresAtMs = parseBackendIsoToMs(paymentSession.expires_at);
+    if (Number.isNaN(expiresAtMs)) {
+      setPaymentRemainingSec(0);
+      return;
+    }
+
+    function tick() {
+      const diffSec = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
+      setPaymentRemainingSec(diffSec);
+    }
+
+    tick();
+    const id = window.setInterval(() => {
+      tick();
+      const remaining = Math.max(0, Math.ceil((expiresAtMs - Date.now()) / 1000));
+      if (remaining <= 0) window.clearInterval(id);
+    }, 1000);
+
+    return () => window.clearInterval(id);
+  }, [paymentSession]);
+
+  function formatCountdown(totalSeconds) {
+    const s = Math.max(0, Number(totalSeconds) || 0);
+    const m = Math.floor(s / 60);
+    const r = s % 60;
+    return `${m}:${String(r).padStart(2, '0')}`;
+  }
 
   useEffect(() => {
     // dacă venim din redirect Keycloak, token-ul este în hash (#access_token=...)
@@ -193,19 +239,24 @@ export default function App() {
       return;
     }
     try {
-      const res = await fetch(`${API_BASE}/events/${eventId}/tickets`, {
+      const res = await fetch(`${PAYMENT_API_BASE}/payments/start`, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
         },
+        body: JSON.stringify({ event_id: eventId }),
       });
       const data = await res.json();
-      if (data && data.code) {
-        alert(`Ticket cumpărat!\nCod bilet: ${data.code}`);
-      } else {
-        alert(`Ticket response:\n${JSON.stringify(data, null, 2)}`);
+      if (!res.ok) {
+        alert(`Nu am putut porni sesiunea de plată:\n${data.error || JSON.stringify(data)}`);
+        return;
       }
-      await loadEvents();
+      const session = data.session || data;
+      setPaymentSession(session);
+      alert(
+        `Sesiune de plată creată.\nAi 2 minute să confirmi plata în secțiunea de jos (Sesiune de plată activă).\nSession ID: ${session.id}`
+      );
     } catch (e) {
       alert(`Error: ${e}`);
     }
@@ -864,6 +915,106 @@ export default function App() {
             Reîncarcă notificările mele
           </button>
           <pre style={preStyle}>{myUserNotificationsText}</pre>
+        </div>
+      )}
+
+      {paymentSession && (
+        <div style={cardStyle}>
+          <h2>Sesiune de plată activă</h2>
+          <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+            Ai 2 minute să confirmi plata; după aceea sesiunea expiră și locul nu mai este rezervat.
+          </p>
+          <p style={{ fontSize: '0.95rem', fontWeight: 600, marginTop: '0.35rem' }}>
+            Timp rămas: {formatCountdown(paymentRemainingSec)}
+          </p>
+          {paymentRemainingSec <= 0 && (
+            <p style={{ fontSize: '0.85rem', color: '#fca5a5', marginTop: '0.35rem' }}>
+              Sesiunea a expirat. Pornește o nouă sesiune de plată din lista de evenimente.
+            </p>
+          )}
+          <p style={{ fontSize: '0.8rem', color: '#9ca3af' }}>
+            Session ID: {paymentSession.id} • Event ID: {paymentSession.event_id}
+            <br />
+            Creată la: {paymentSession.created_at}
+            <br />
+            Expiră la: {paymentSession.expires_at}
+          </p>
+          <div style={{ display: 'flex', gap: '0.5rem', marginTop: '0.5rem' }}>
+            <button
+              disabled={paymentRemainingSec <= 0}
+              style={
+                paymentRemainingSec <= 0
+                  ? { ...buttonStyle, opacity: 0.55, cursor: 'not-allowed' }
+                  : buttonStyle
+              }
+              onClick={async () => {
+                try {
+                  const res = await fetch(
+                    `${PAYMENT_API_BASE}/payments/confirm/${paymentSession.id}`,
+                    {
+                      method: 'POST',
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                      },
+                    }
+                  );
+                  const data = await res.json();
+                  if (res.ok) {
+                    alert(
+                      `Plată confirmată și bilet emis!\nCod bilet: ${data.ticket?.code}`
+                    );
+                    setPaymentSession(null);
+                    await loadEvents();
+                    await loadMyTickets();
+                  } else {
+                    alert(
+                      `Nu am putut confirma plata:\n${data.error || JSON.stringify(data)}`
+                    );
+                    if (
+                      data.error &&
+                      data.error.toLowerCase().includes('expired')
+                    ) {
+                      setPaymentSession(null);
+                    }
+                  }
+                } catch (e) {
+                  alert(String(e));
+                }
+              }}
+            >
+              Confirmă plata (emite bilet)
+            </button>
+            <button
+              style={secondaryButtonStyle}
+              onClick={async () => {
+                try {
+                  const res = await fetch(
+                    `${PAYMENT_API_BASE}/payments/cancel/${paymentSession.id}`,
+                    {
+                      method: 'POST',
+                      headers: {
+                        Authorization: `Bearer ${token}`,
+                      },
+                    }
+                  );
+                  const data = await res.json();
+                  if (res.ok) {
+                    alert('Sesiunea de plată a fost anulată.');
+                  } else {
+                    alert(
+                      `Nu am putut anula sesiunea de plată:\n${data.error || JSON.stringify(data)}`
+                    );
+                  }
+                } catch (e) {
+                  alert(String(e));
+                } finally {
+                  setPaymentSession(null);
+                }
+              }}
+            >
+              Anulează
+            </button>
+          </div>
         </div>
       )}
 

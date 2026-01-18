@@ -5,16 +5,22 @@
 echo "🔨 Construire imagini Docker pentru EventFlow..."
 echo ""
 
-# Construiește imaginea pentru User Profile Service
-echo "📦 Construire user-profile-service..."
-docker build -t eventflow/user-profile-service:latest ./services/user-profile-service
+set -e
 
-if [ $? -eq 0 ]; then
-    echo "✅ user-profile-service construit cu succes"
-else
-    echo "❌ Eroare la construirea user-profile-service"
-    exit 1
-fi
+build_one() {
+  local name="$1"
+  local dir="$2"
+  echo "📦 Construire ${name}..."
+  docker build -t "eventflow/${name}:latest" "${dir}"
+  echo "✅ ${name} construit cu succes"
+  echo ""
+}
+
+build_one "user-profile-service" "./services/user-profile-service"
+build_one "ticketing-service" "./services/ticketing-service"
+build_one "notification-service" "./services/notification-service"
+build_one "gate-service" "./services/gate-service"
+build_one "payment-service" "./services/payment-service"
 
 echo ""
 echo "✅ Toate imaginile au fost construite cu succes!"
