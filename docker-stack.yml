@@ -185,6 +185,29 @@ services:
         constraints:
           - node.role == manager
 
+  # Gate Service - validare bilete la intrare
+  gate-service:
+    image: eventflow/gate-service:latest
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-eventflow}:${POSTGRES_PASSWORD:-eventflow}@postgres:5432/${POSTGRES_DB:-eventflow}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-eventflow}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-eventflow-api}
+      PORT: 3007
+      RABBITMQ_HOST: rabbitmq
+    ports:
+      - "3007:3007"
+    networks:
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
 volumes:
   postgres-data:
     driver: local

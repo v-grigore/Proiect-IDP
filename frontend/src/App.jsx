@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
 
-const API_BASE = 'http://localhost:3005';
+const API_BASE = 'http://localhost:3005'; // ticketing-service
+const GATE_API_BASE = 'http://localhost:3007'; // gate-service pentru scanare
 const KEYCLOAK_BASE = 'http://localhost:8080/realms/eventflow/protocol/openid-connect';
 const FRONTEND_CLIENT_ID = 'eventflow-frontend';
 
@@ -256,7 +257,7 @@ export default function App() {
     setScanResult('Se verifică biletul...');
     try {
       const res = await fetch(
-        `${API_BASE}/scan/${encodeURIComponent(scanCode.trim())}`,
+        `${GATE_API_BASE}/scan/${encodeURIComponent(scanCode.trim())}`,
         {
           method: 'POST',
           headers: {

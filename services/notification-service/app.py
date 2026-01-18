@@ -136,7 +136,7 @@ def get_notifications():
 
 
 def consume_from_rabbitmq():
-    """Consumer simplu care ascultă queue-ul 'ticket_booked' și salvează notificări."""
+    """Consumer simplu care ascultă queue-urile de tip ticket_* și salvează notificări."""
     rabbit_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
     while True:
         try:
@@ -144,6 +144,7 @@ def consume_from_rabbitmq():
             connection = pika.BlockingConnection(params)
             channel = connection.channel()
             channel.queue_declare(queue='ticket_booked', durable=False)
+            channel.queue_declare(queue='ticket_scanned', durable=False)
 
             def callback(ch, method, properties, body):
                 try:
@@ -152,7 +153,7 @@ def consume_from_rabbitmq():
                         n = Notification(
                             event_id=payload.get('event_id'),
                             organizer_sub=payload.get('organizer_sub'),
-                            buyer_sub=payload.get('buyer_sub'),
+                            buyer_sub=payload.get('buyer_sub') or payload.get('scanner_sub'),
                             code=payload.get('code'),
                         )
                         db.session.add(n)
@@ -163,7 +164,8 @@ def consume_from_rabbitmq():
                     ch.basic_ack(delivery_tag=method.delivery_tag)
 
             channel.basic_consume(queue='ticket_booked', on_message_callback=callback)
-            print("Notification service: listening for ticket_booked messages...")
+            channel.basic_consume(queue='ticket_scanned', on_message_callback=callback)
+            print("Notification service: listening for ticket_booked and ticket_scanned messages...")
             channel.start_consuming()
         except Exception as e:
             print(f"Notification consumer error: {e}, retrying in 5s...")
