@@ -27,6 +27,7 @@ function decodeToken(t) {
         : [];
     return {
       username: payload.preferred_username || payload.email || payload.sub,
+      sub: payload.sub,
       roles,
     };
   } catch {
@@ -61,6 +62,13 @@ export default function App() {
 
   // UI / "pagini"
   const [activeTab, setActiveTab] = useState('events'); // events | my-tickets | admin | scan | notifications | debug
+
+  // Admin helpers
+  const [editingEventId, setEditingEventId] = useState(null);
+  const [waitlistText, setWaitlistText] = useState('');
+  const [waitlistEntries, setWaitlistEntries] = useState([]);
+  const [selectedWaitlistEventId, setSelectedWaitlistEventId] = useState(null);
+  const [myUserNotificationsText, setMyUserNotificationsText] = useState('');
 
   useEffect(() => {
     // dacă venim din redirect Keycloak, token-ul este în hash (#access_token=...)
@@ -154,8 +162,14 @@ export default function App() {
       description: evDescription,
     };
     try {
-      const res = await fetch(`${API_BASE}/events`, {
-        method: 'POST',
+      const isEdit = !!editingEventId;
+      const url = isEdit
+        ? `${API_BASE}/events/${editingEventId}`
+        : `${API_BASE}/events`;
+      const method = isEdit ? 'PATCH' : 'POST';
+
+      const res = await fetch(url, {
+        method,
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${token}`,
@@ -164,6 +178,9 @@ export default function App() {
       });
       const data = await res.json();
       setCreateResult(JSON.stringify(data, null, 2));
+      if (res.ok && isEdit) {
+        setEditingEventId(null);
+      }
       await loadEvents();
     } catch (e) {
       setCreateResult(String(e));
@@ -297,6 +314,162 @@ export default function App() {
     }
   }
 
+  async function loadMyUserNotifications() {
+    if (!token) {
+      setMyUserNotificationsText('Trebuie să fii logat.');
+      return;
+    }
+    setMyUserNotificationsText('Se încarcă notificările tale...');
+    try {
+      const res = await fetch('http://localhost:3006/my-notifications', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+        },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        setMyUserNotificationsText(JSON.stringify(data, null, 2));
+      } else {
+        setMyUserNotificationsText(
+          `Eroare la încărcarea notificărilor: ${data.error || JSON.stringify(data)}`
+        );
+      }
+    } catch (e) {
+      setMyUserNotificationsText(String(e));
+    }
+  }
+
+  function isMyEvent(ev) {
+    return !!(userInfo && userInfo.sub && ev.created_by === userInfo.sub);
+  }
+
+  function startEditEvent(ev) {
+    setEditingEventId(ev.id);
+    setEvName(ev.name || '');
+    setEvLocation(ev.location || '');
+    setEvStartsAt(ev.starts_at || '');
+    setEvTickets(ev.total_tickets ?? 0);
+    setEvDescription(ev.description || '');
+    setActiveTab('admin');
+  }
+
+  async function loadWaitlistForEvent(eventId) {
+    if (!token) {
+      alert('Trebuie să fii logat ca ORGANIZER / ADMIN.');
+      return;
+    }
+    setSelectedWaitlistEventId(eventId);
+    setWaitlistText('Se încarcă lista de așteptare...');
+    setWaitlistEntries([]);
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/events/${eventId}/waitlist`,
+        {
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        setWaitlistEntries(Array.isArray(data) ? data : []);
+        setWaitlistText(JSON.stringify(data, null, 2));
+      } else {
+        setWaitlistText(
+          `Eroare la încărcarea listei de așteptare: ${data.error || JSON.stringify(data)}`
+        );
+      }
+    } catch (e) {
+      setWaitlistText(String(e));
+    }
+  }
+
+  async function promoteFromWaitlist(eventId) {
+    if (!token) {
+      alert('Trebuie să fii logat ca ORGANIZER / ADMIN.');
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/events/${eventId}/waitlist/promote`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        alert('Am promovat următorul utilizator din waitlist în bilet real.');
+        await loadEvents();
+        await loadWaitlistForEvent(eventId);
+      } else {
+        alert(
+          `Nu am putut promova utilizatorul din waitlist:\n${data.error || JSON.stringify(data)}`
+        );
+      }
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
+  async function acceptWaitlistEntry(entryId, eventId) {
+    if (!token) {
+      alert('Trebuie să fii logat ca ORGANIZER / ADMIN.');
+      return;
+    }
+    try {
+      const res = await fetch(
+        `${API_BASE}/admin/waitlist/${entryId}/promote`,
+        {
+          method: 'POST',
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+        }
+      );
+      const data = await res.json();
+      if (res.ok) {
+        alert(
+          'Am acceptat utilizatorul de pe lista de așteptare și i-am emis un bilet. Va primi și notificare în UI-ul de user.'
+        );
+        await loadEvents();
+        await loadWaitlistForEvent(eventId);
+      } else {
+        alert(
+          `Nu am putut accepta acest entry din waitlist:\n${data.error || JSON.stringify(data)}`
+        );
+      }
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
+  async function joinWaitlist(eventId) {
+    if (!token) {
+      alert('Trebuie să fii logat în Keycloak ca să intri pe lista de așteptare.');
+      return;
+    }
+    try {
+      const res = await fetch(`${API_BASE}/events/${eventId}/waitlist`, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'Content-Type': 'application/json',
+        },
+      });
+      const data = await res.json();
+      if (res.ok) {
+        alert(`Lista de așteptare:\n${data.message || ''}\nPozitie: ${data.entry?.position ?? 'n/a'}`);
+      } else {
+        alert(`Nu am putut adăuga pe lista de așteptare:\n${data.error || JSON.stringify(data)}`);
+      }
+    } catch (e) {
+      alert(String(e));
+    }
+  }
+
   return (
     <div
       style={{
@@ -359,6 +532,16 @@ export default function App() {
             onClick={() => setActiveTab('my-tickets')}
           />
         )}
+        {userInfo && (
+          <TabButton
+            label="Notificările mele"
+            active={activeTab === 'my-notifications'}
+            onClick={() => {
+              setActiveTab('my-notifications');
+              loadMyUserNotifications();
+            }}
+          />
+        )}
         {isOrganizerOrAdmin && (
           <TabButton
             label="Admin / Organizer"
@@ -411,22 +594,43 @@ export default function App() {
             {events.length === 0 && !loadingEvents && (
               <p>Nu există evenimente încă.</p>
             )}
-            {events.map(ev => (
-              <div key={ev.id} style={eventStyle}>
-                <div>
-                  <strong>{ev.name}</strong>
-                  <div style={metaStyle}>
-                    {ev.location || ''} • {ev.starts_at || ''}
-                    <br />
-                    Bilete: {ev.tickets_sold} / {ev.total_tickets} (rămase{' '}
-                    {ev.remaining_tickets})
+            {events.map(ev => {
+              const soldOut = ev.remaining_tickets <= 0;
+              return (
+                <div key={ev.id} style={eventStyle}>
+                  <div>
+                    <strong>{ev.name}</strong>
+                    <div style={metaStyle}>
+                      {ev.location || ''} • {ev.starts_at || ''}
+                      <br />
+                      Bilete: {ev.tickets_sold} / {ev.total_tickets} (rămase{' '}
+                      {ev.remaining_tickets})
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'flex-end' }}>
+                    <button
+                      style={{
+                        ...buttonStyle,
+                        opacity: soldOut ? 0.5 : 1,
+                        cursor: soldOut ? 'not-allowed' : 'pointer',
+                      }}
+                      onClick={() => !soldOut && buyTicket(ev.id)}
+                      disabled={soldOut}
+                    >
+                      {soldOut ? 'Sold out' : 'Cumpără bilet'}
+                    </button>
+                    {soldOut && (
+                      <button
+                        style={secondaryButtonStyle}
+                        onClick={() => joinWaitlist(ev.id)}
+                      >
+                        Intră pe lista de așteptare
+                      </button>
+                    )}
                   </div>
                 </div>
-                <button style={buttonStyle} onClick={() => buyTicket(ev.id)}>
-                  Cumpără bilet
-                </button>
-              </div>
-            ))}
+              );
+            })}
           </div>
         </div>
       )}
@@ -443,21 +647,32 @@ export default function App() {
           </button>
           <div style={{ marginTop: '0.75rem' }}>
             {myTicketsList.map(t => (
-              <div key={t.id} style={ticketCardStyle}>
-                <div style={{ fontSize: '0.8rem', color: '#9ca3af' }}>
-                  Event: {t.event?.name || t.event_id} •{' '}
-                  {t.event?.starts_at || t.purchased_at}
-                </div>
-                <div
-                  style={{
-                    fontSize: '1.1rem',
-                    fontWeight: 600,
-                    letterSpacing: '0.1em',
-                  }}
-                >
-                  {t.code}
-                </div>
-              </div>
+          <div key={t.id} style={ticketCardStyle}>
+            <div style={{ fontSize: '0.8rem', color: '#9ca3af' }}>
+              Event: {t.event?.name || t.event_id} •{' '}
+              {t.event?.starts_at || t.purchased_at}
+            </div>
+            <div
+              style={{
+                fontSize: '1.1rem',
+                fontWeight: 600,
+                letterSpacing: '0.1em',
+              }}
+            >
+              {t.code}
+            </div>
+            <div
+              style={{
+                marginTop: '0.25rem',
+                fontSize: '0.8rem',
+                color: t.used_at ? '#f97373' : '#4ade80',
+              }}
+            >
+              {t.used_at
+                ? `Status: FOLOSIT la ${t.used_at} de către ${t.used_by || 'gate-service'}`
+                : 'Status: NEFOLOSIT (valabil)'}
+            </div>
+          </div>
             ))}
           </div>
           <pre style={preStyle}>{myTicketsText}</pre>
@@ -465,55 +680,140 @@ export default function App() {
       )}
 
       {activeTab === 'admin' && isOrganizerOrAdmin && (
-        <div style={cardStyle}>
-          <h2>Creează eveniment (ADMIN / ORGANIZER)</h2>
-          <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
-            Doar utilizatorii cu rolurile ORGANIZER sau ADMIN pot crea
-            evenimente noi.
-          </p>
-          <label style={labelStyle}>Nume eveniment</label>
-          <input
-            style={inputStyle}
-            value={evName}
-            onChange={e => setEvName(e.target.value)}
-          />
+        <div>
+          <div style={cardStyle}>
+            <h2>{editingEventId ? 'Editează eveniment' : 'Creează eveniment (ADMIN / ORGANIZER)'}</h2>
+            <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+              Doar utilizatorii cu rolurile ORGANIZER sau ADMIN pot crea sau modifica evenimente.
+            </p>
+            <label style={labelStyle}>Nume eveniment</label>
+            <input
+              style={inputStyle}
+              value={evName}
+              onChange={e => setEvName(e.target.value)}
+            />
 
-          <label style={labelStyle}>Locație</label>
-          <input
-            style={inputStyle}
-            value={evLocation}
-            onChange={e => setEvLocation(e.target.value)}
-          />
+            <label style={labelStyle}>Locație</label>
+            <input
+              style={inputStyle}
+              value={evLocation}
+              onChange={e => setEvLocation(e.target.value)}
+            />
 
-          <label style={labelStyle}>Începe la (ISO 8601)</label>
-          <input
-            style={inputStyle}
-            value={evStartsAt}
-            onChange={e => setEvStartsAt(e.target.value)}
-            placeholder="2025-12-31T20:00:00"
-          />
+            <label style={labelStyle}>Începe la (ISO 8601)</label>
+            <input
+              style={inputStyle}
+              value={evStartsAt}
+              onChange={e => setEvStartsAt(e.target.value)}
+              placeholder="2025-12-31T20:00:00"
+            />
 
-          <label style={labelStyle}>Număr total de bilete</label>
-          <input
-            style={inputStyle}
-            type="number"
-            min={1}
-            value={evTickets}
-            onChange={e => setEvTickets(e.target.value)}
-          />
+            <label style={labelStyle}>Număr total de bilete</label>
+            <input
+              style={inputStyle}
+              type="number"
+              min={1}
+              value={evTickets}
+              onChange={e => setEvTickets(e.target.value)}
+            />
 
-          <label style={labelStyle}>Descriere</label>
-          <textarea
-            style={textareaStyle}
-            rows={2}
-            value={evDescription}
-            onChange={e => setEvDescription(e.target.value)}
-          />
+            <label style={labelStyle}>Descriere</label>
+            <textarea
+              style={textareaStyle}
+              rows={2}
+              value={evDescription}
+              onChange={e => setEvDescription(e.target.value)}
+            />
 
-          <button style={buttonStyle} onClick={createEvent}>
-            Creează eveniment
-          </button>
-          <pre style={preStyle}>{createResult}</pre>
+            <button style={buttonStyle} onClick={createEvent}>
+              {editingEventId ? 'Salvează modificările' : 'Creează eveniment'}
+            </button>
+            {editingEventId && (
+              <button
+                style={{ ...secondaryButtonStyle, marginLeft: '0.5rem' }}
+                onClick={() => {
+                  setEditingEventId(null);
+                  setEvName('');
+                  setEvLocation('');
+                  setEvStartsAt('');
+                  setEvTickets(100);
+                  setEvDescription('');
+                }}
+              >
+                Renunță la editare
+              </button>
+            )}
+            <pre style={preStyle}>{createResult}</pre>
+          </div>
+
+          <div style={cardStyle}>
+            <h2>Evenimentele mele</h2>
+            <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+              Evenimente create de tine (sau toate, dacă ești ADMIN). Poți să le editezi și să gestionezi lista de așteptare.
+            </p>
+            {events.filter(ev => isMyEvent(ev) || (userInfo && userInfo.roles.includes('ADMIN'))).length === 0 && (
+              <p>Încă nu ai creat niciun eveniment.</p>
+            )}
+            {events
+              .filter(ev => isMyEvent(ev) || (userInfo && userInfo.roles.includes('ADMIN')))
+              .map(ev => (
+                <div key={ev.id} style={eventStyle}>
+                  <div>
+                    <strong>{ev.name}</strong>
+                    <div style={metaStyle}>
+                      {ev.location || ''} • {ev.starts_at || ''}
+                      <br />
+                      Bilete: {ev.tickets_sold} / {ev.total_tickets} (rămase {ev.remaining_tickets})
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '0.25rem', alignItems: 'flex-end' }}>
+                    <button
+                      style={secondaryButtonStyle}
+                      onClick={() => startEditEvent(ev)}
+                    >
+                      Editează
+                    </button>
+                    <button
+                      style={secondaryButtonStyle}
+                      onClick={() => loadWaitlistForEvent(ev.id)}
+                    >
+                      Vezi lista de așteptare
+                    </button>
+                    <button
+                      style={buttonStyle}
+                      onClick={() => promoteFromWaitlist(ev.id)}
+                    >
+                      Promovează următorul din listă
+                    </button>
+                  </div>
+                </div>
+              ))}
+            {selectedWaitlistEventId && (
+              <div style={{ marginTop: '0.75rem' }}>
+                <h3 style={{ fontSize: '0.9rem' }}>Lista de așteptare pentru eveniment ID {selectedWaitlistEventId}</h3>
+                {waitlistEntries.length === 0 ? (
+                  <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>Nu există intrări în lista de așteptare.</p>
+                ) : (
+                  <div style={{ marginBottom: '0.5rem' }}>
+                    {waitlistEntries.map(entry => (
+                      <div key={entry.id} style={ticketCardStyle}>
+                        <div style={{ fontSize: '0.8rem', color: '#9ca3af' }}>
+                          Pozitie #{entry.position} • user_sub: {entry.keycloak_sub}
+                        </div>
+                        <button
+                          style={{ ...buttonStyle, marginTop: '0.25rem' }}
+                          onClick={() => acceptWaitlistEntry(entry.id, selectedWaitlistEventId)}
+                        >
+                          Acceptă acest user (creează bilet și trimite notificare)
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <pre style={preStyle}>{waitlistText}</pre>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -551,6 +851,19 @@ export default function App() {
             Reîncarcă notificările
           </button>
           <pre style={preStyle}>{notifications}</pre>
+        </div>
+      )}
+
+      {activeTab === 'my-notifications' && userInfo && (
+        <div style={cardStyle}>
+          <h2>Notificările mele</h2>
+          <p style={{ fontSize: '0.85rem', color: '#9ca3af' }}>
+            Aici vezi notificări legate de biletele tale (de exemplu când un organizator te acceptă de pe lista de așteptare).
+          </p>
+          <button style={secondaryButtonStyle} onClick={loadMyUserNotifications}>
+            Reîncarcă notificările mele
+          </button>
+          <pre style={preStyle}>{myUserNotificationsText}</pre>
         </div>
       )}
 

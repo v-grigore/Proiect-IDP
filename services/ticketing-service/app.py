@@ -110,6 +110,29 @@ class BannedUser(db.Model):
         }
 
 
+class WaitlistEntry(db.Model):
+    __tablename__ = 'waitlist_entries'
+
+    id = db.Column(db.Integer, primary_key=True)
+    event_id = db.Column(db.Integer, db.ForeignKey('events.id', ondelete='CASCADE'), nullable=False)
+    keycloak_sub = db.Column(db.String(255), nullable=False)
+    status = db.Column(db.String(32), nullable=False, default='pending')  # pending / promoted
+    position = db.Column(db.Integer, nullable=False, default=1)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    promoted_ticket_id = db.Column(db.Integer, nullable=True)
+
+    def to_dict(self):
+        return {
+            'id': self.id,
+            'event_id': self.event_id,
+            'keycloak_sub': self.keycloak_sub,
+            'status': self.status,
+            'position': self.position,
+            'created_at': self.created_at.isoformat() if self.created_at else None,
+            'promoted_ticket_id': self.promoted_ticket_id,
+        }
+
+
 # Auth helpers (copiat și simplificat din User Profile Service)
 def verify_token(f):
     """Decorator pentru verificarea JWT token-ului de la Keycloak"""
@@ -299,6 +322,46 @@ def get_event(event_id):
     return jsonify(event.to_dict()), 200
 
 
+@app.route('/events/<int:event_id>', methods=['PATCH'])
+@require_role('ADMIN', 'ORGANIZER')
+def update_event(event_id):
+    """Update simplu pentru eveniment (doar organizatorul sau ADMIN)."""
+    event = Event.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    roles = getattr(request, 'user_roles', [])
+    user_sub = getattr(request, 'user_sub', None)
+
+    if 'ADMIN' not in roles and event.created_by != user_sub:
+        return jsonify({'error': 'Not allowed to edit this event'}), 403
+
+    data = request.get_json() or {}
+
+    if 'name' in data:
+        event.name = data['name']
+    if 'description' in data:
+        event.description = data['description']
+    if 'location' in data:
+        event.location = data['location']
+    if 'starts_at' in data:
+        try:
+            event.starts_at = datetime.fromisoformat(data['starts_at'])
+        except ValueError:
+            return jsonify({'error': 'starts_at trebuie să fie ISO 8601'}), 400
+    if 'total_tickets' in data:
+        try:
+            new_total = int(data['total_tickets'])
+        except (TypeError, ValueError):
+            return jsonify({'error': 'total_tickets trebuie să fie întreg'}), 400
+        if new_total < event.tickets_sold:
+            return jsonify({'error': 'total_tickets nu poate fi mai mic decât tickets_sold'}), 400
+        event.total_tickets = new_total
+
+    db.session.commit()
+    return jsonify(event.to_dict()), 200
+
+
 @app.route('/events/<int:event_id>/tickets', methods=['POST'])
 @verify_token
 @rate_limit(max_requests=2, window_seconds=60)
@@ -331,6 +394,61 @@ def buy_ticket(event_id):
     return jsonify(ticket.to_dict()), 201
 
 
+@app.route('/events/<int:event_id>/waitlist', methods=['POST'])
+@verify_token
+def join_waitlist(event_id):
+    """Adaugă utilizatorul curent pe lista de așteptare pentru un eveniment sold-out."""
+    if is_banned(request.user_sub):
+        return jsonify({'error': 'User is banned from buying tickets'}), 403
+
+    event = Event.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    # dacă mai sunt bilete, nu are sens lista de așteptare
+    if event.remaining_tickets() > 0:
+        return jsonify({'error': 'Event is not sold out; you can still buy tickets'}), 400
+
+    # dacă utilizatorul are deja bilet la acest eveniment, nu îl mai punem pe listă
+    existing_ticket = Ticket.query.filter_by(
+        event_id=event.id,
+        keycloak_sub=request.user_sub,
+    ).first()
+    if existing_ticket:
+        return jsonify({'error': 'You already have a ticket for this event'}), 400
+
+    # verificăm dacă este deja pe lista de așteptare
+    existing_entry = WaitlistEntry.query.filter_by(
+        event_id=event.id,
+        keycloak_sub=request.user_sub,
+        status='pending',
+    ).first()
+    if existing_entry:
+        return jsonify({
+            'message': 'Already on waitlist',
+            'entry': existing_entry.to_dict(),
+        }), 200
+
+    current_count = WaitlistEntry.query.filter_by(
+        event_id=event.id,
+        status='pending',
+    ).count()
+
+    entry = WaitlistEntry(
+        event_id=event.id,
+        keycloak_sub=request.user_sub,
+        status='pending',
+        position=current_count + 1,
+    )
+    db.session.add(entry)
+    db.session.commit()
+
+    return jsonify({
+        'message': 'Added to waitlist',
+        'entry': entry.to_dict(),
+    }), 201
+
+
 @app.route('/my-tickets', methods=['GET'])
 @verify_token
 def my_tickets():
@@ -339,6 +457,137 @@ def my_tickets():
         return jsonify({'error': 'User is banned'}), 403
     tickets = Ticket.query.filter_by(keycloak_sub=request.user_sub).all()
     return jsonify([t.to_dict() for t in tickets]), 200
+
+
+@app.route('/admin/events/<int:event_id>/waitlist', methods=['GET'])
+@require_role('ADMIN', 'ORGANIZER')
+def admin_get_waitlist(event_id):
+    """Listă de așteptare pentru un eveniment (ADMIN sau organizatorul evenimentului)."""
+    event = Event.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    roles = getattr(request, 'user_roles', [])
+    user_sub = getattr(request, 'user_sub', None)
+
+    if 'ADMIN' not in roles and event.created_by != user_sub:
+        return jsonify({'error': 'Not allowed for this event'}), 403
+
+    entries = (
+        WaitlistEntry.query.filter_by(event_id=event.id, status='pending')
+        .order_by(WaitlistEntry.created_at.asc())
+        .all()
+    )
+    return jsonify([e.to_dict() for e in entries]), 200
+
+
+@app.route('/admin/events/<int:event_id>/waitlist/promote', methods=['POST'])
+@require_role('ADMIN', 'ORGANIZER')
+def admin_promote_waitlist(event_id):
+    """
+    Promovează primul utilizator din lista de așteptare în bilet real,
+    dacă mai sunt locuri disponibile.
+    """
+    event = Event.query.get(event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    roles = getattr(request, 'user_roles', [])
+    user_sub = getattr(request, 'user_sub', None)
+
+    if 'ADMIN' not in roles and event.created_by != user_sub:
+        return jsonify({'error': 'Not allowed for this event'}), 403
+
+    if event.remaining_tickets() <= 0:
+        return jsonify({'error': 'No tickets available to promote waitlist'}), 400
+
+    entry = (
+        WaitlistEntry.query.filter_by(event_id=event.id, status='pending')
+        .order_by(WaitlistEntry.created_at.asc())
+        .first()
+    )
+    if not entry:
+        return jsonify({'error': 'No pending entries on waitlist'}), 404
+
+    if is_banned(entry.keycloak_sub):
+        entry.status = 'promoted'
+        db.session.commit()
+        return jsonify({'error': 'Next user on waitlist is banned; marked as skipped'}), 400
+
+    ticket_code = secrets.token_hex(4)
+    ticket = Ticket(
+        event_id=event.id,
+        keycloak_sub=entry.keycloak_sub,
+        code=ticket_code,
+    )
+    event.tickets_sold += 1
+
+    entry.status = 'promoted'
+    db.session.add(ticket)
+    db.session.commit()
+
+    entry.promoted_ticket_id = ticket.id
+    db.session.commit()
+
+    publish_ticket_notification(ticket)
+
+    return jsonify({
+        'message': 'User promoted from waitlist and ticket created',
+        'entry': entry.to_dict(),
+        'ticket': ticket.to_dict(),
+    }), 201
+
+
+@app.route('/admin/waitlist/<int:entry_id>/promote', methods=['POST'])
+@require_role('ADMIN', 'ORGANIZER')
+def admin_promote_waitlist_entry(entry_id):
+    """
+    Promovează un entry specific din waitlist (ales de organizator) în bilet real.
+    """
+    entry = WaitlistEntry.query.get(entry_id)
+    if not entry or entry.status != 'pending':
+        return jsonify({'error': 'Waitlist entry not found or not pending'}), 404
+
+    event = Event.query.get(entry.event_id)
+    if not event:
+        return jsonify({'error': 'Event not found'}), 404
+
+    roles = getattr(request, 'user_roles', [])
+    user_sub = getattr(request, 'user_sub', None)
+
+    if 'ADMIN' not in roles and event.created_by != user_sub:
+        return jsonify({'error': 'Not allowed for this event'}), 403
+
+    if event.remaining_tickets() <= 0:
+        return jsonify({'error': 'No tickets available to promote waitlist'}), 400
+
+    if is_banned(entry.keycloak_sub):
+        entry.status = 'promoted'
+        db.session.commit()
+        return jsonify({'error': 'User on waitlist is banned; marked as skipped'}), 400
+
+    ticket_code = secrets.token_hex(4)
+    ticket = Ticket(
+        event_id=event.id,
+        keycloak_sub=entry.keycloak_sub,
+        code=ticket_code,
+    )
+    event.tickets_sold += 1
+
+    entry.status = 'promoted'
+    db.session.add(ticket)
+    db.session.commit()
+
+    entry.promoted_ticket_id = ticket.id
+    db.session.commit()
+
+    publish_ticket_notification(ticket)
+
+    return jsonify({
+        'message': 'User promoted from waitlist and ticket created',
+        'entry': entry.to_dict(),
+        'ticket': ticket.to_dict(),
+    }), 201
 
 
 @app.route('/scan/<code>', methods=['POST'])

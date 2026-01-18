@@ -135,6 +135,20 @@ def get_notifications():
     return jsonify([n.to_dict() for n in notes]), 200
 
 
+@app.route('/my-notifications', methods=['GET'])
+@verify_token
+def my_notifications():
+    """Notificări pentru utilizatorul curent (de ex. când i se emite/promovează un bilet)."""
+    user_sub = getattr(request, 'user_sub', None)
+    notes = (
+        Notification.query.filter_by(buyer_sub=user_sub)
+        .order_by(Notification.created_at.desc())
+        .limit(50)
+        .all()
+    )
+    return jsonify([n.to_dict() for n in notes]), 200
+
+
 def consume_from_rabbitmq():
     """Consumer simplu care ascultă queue-urile de tip ticket_* și salvează notificări."""
     rabbit_host = os.getenv('RABBITMQ_HOST', 'rabbitmq')
