@@ -15,7 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Copy application code
 COPY . .
 
-EXPOSE 3007
+EXPOSE 3008
 
 CMD ["python", "app.py"]
 
