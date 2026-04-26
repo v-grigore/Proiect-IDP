@@ -32,6 +32,9 @@ from cache import (
 app = Flask(__name__)
 CORS(app)
 
+from prometheus_flask_exporter import PrometheusMetrics
+PrometheusMetrics(app)
+
 # Configuration
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
     'DATABASE_URL',

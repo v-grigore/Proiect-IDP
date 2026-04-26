@@ -29,6 +29,9 @@ from rate_limiter import RedisSlidingWindowRateLimiter, RateLimiterBackendUnavai
 app = Flask(__name__)
 CORS(app)
 
+from prometheus_flask_exporter import PrometheusMetrics
+PrometheusMetrics(app)
+
 app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv(
     'DATABASE_URL',
     'postgresql://eventflow:eventflow@postgres:5432/eventflow'

@@ -20,6 +20,9 @@ from flask_cors import CORS
 app = Flask(__name__)
 CORS(app)
 
+from prometheus_flask_exporter import PrometheusMetrics
+PrometheusMetrics(app)
+
 KEYCLOAK_URL = os.getenv('KEYCLOAK_URL', 'http://keycloak:8080')
 KEYCLOAK_REALM = os.getenv('KEYCLOAK_REALM', 'eventflow')
 KEYCLOAK_CLIENT_ID = os.getenv('KEYCLOAK_CLIENT_ID', 'eventflow-api')
