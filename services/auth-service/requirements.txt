@@ -3,3 +3,4 @@ Flask-CORS==4.0.0
 PyJWT==2.8.0
 cryptography==41.0.7
 requests==2.31.0
+prometheus-flask-exporter==0.23.1
