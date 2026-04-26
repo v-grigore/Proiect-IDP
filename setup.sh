@@ -23,11 +23,14 @@ else
 fi
 
 # Creează rețelele
-echo "🌐 Creare rețele Docker..."
-docker network create --driver overlay data-network 2>/dev/null || echo "  ⚠️  Rețeaua data-network există deja"
-docker network create --driver overlay internal-network 2>/dev/null || echo "  ⚠️  Rețeaua internal-network există deja"
+echo "Creare retele Docker..."
+docker network create --driver overlay edge-network 2>/dev/null || echo "  Reteaua edge-network exista deja"
+docker network create --driver overlay internal-network 2>/dev/null || echo "  Reteaua internal-network exista deja"
+docker network create --driver overlay data-network 2>/dev/null || echo "  Reteaua data-network exista deja"
+docker network create --driver overlay db-network 2>/dev/null || echo "  Reteaua db-network exista deja"
+docker network create --driver overlay monitoring-network 2>/dev/null || echo "  Reteaua monitoring-network exista deja"
 
-echo "✅ Rețele create"
+echo "Retele create"
 
 # Verifică dacă există fișier .env
 if [ ! -f .env ]; then

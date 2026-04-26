@@ -16,15 +16,17 @@ build_one() {
   echo ""
 }
 
+build_one "auth-service" "./services/auth-service"
 build_one "user-profile-service" "./services/user-profile-service"
 build_one "ticketing-service" "./services/ticketing-service"
 build_one "notification-service" "./services/notification-service"
 build_one "gate-service" "./services/gate-service"
 build_one "payment-service" "./services/payment-service"
+build_one "data-service" "./services/data-service"
 
 echo ""
-echo "✅ Toate imaginile au fost construite cu succes!"
+echo "Toate imaginile au fost construite cu succes!"
 echo ""
-echo "📋 Următorul pas:"
+echo "Urmatorul pas:"
 echo "   docker stack deploy -c docker-stack.yml eventflow"
 

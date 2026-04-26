@@ -1,7 +1,9 @@
 version: '3.8'
 
 services:
-  # PostgreSQL Database
+  # ─── Infrastructure ────────────────────────────────────────────────────────
+
+  # PostgreSQL principal (eventflow)
   postgres:
     image: postgres:15-alpine
     environment:
@@ -13,6 +15,7 @@ services:
       - ./database/schema.sql:/docker-entrypoint-initdb.d/schema.sql
     networks:
       - data-network
+      - db-network
       - internal-network
     deploy:
       replicas: 1
@@ -27,7 +30,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # Keycloak Database
+  # PostgreSQL pentru Keycloak
   postgres-keycloak:
     image: postgres:15-alpine
     environment:
@@ -38,6 +41,7 @@ services:
       - keycloak-db-data:/var/lib/postgresql/data
     networks:
       - data-network
+      - db-network
     deploy:
       replicas: 1
       restart_policy:
@@ -80,10 +84,103 @@ services:
       placement:
         constraints:
           - node.role == manager
-    # Healthcheck removed - Keycloak 25.0.0 doesn't have /health/ready endpoint
-    # Service will start normally, just takes longer to be ready
 
-  # User Profile Service (Python)
+  # RabbitMQ - message broker pentru notificări asincrone
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    ports:
+      - "5678:5672"
+      - "15678:15672"
+    networks:
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  # Redis - cache distribuit + rate limiting
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks:
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  # ─── Kong API Gateway ──────────────────────────────────────────────────────
+
+  kong:
+    image: kong:3.6-ubuntu
+    environment:
+      KONG_DATABASE: "off"
+      KONG_DECLARATIVE_CONFIG: /etc/kong/kong.yml
+      KONG_PROXY_ACCESS_LOG: /dev/stdout
+      KONG_ADMIN_ACCESS_LOG: /dev/stdout
+      KONG_PROXY_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_ERROR_LOG: /dev/stderr
+      KONG_ADMIN_LISTEN: "0.0.0.0:8001"
+    volumes:
+      - ./kong/kong.yml:/etc/kong/kong.yml:ro
+    ports:
+      - "8020:8000"
+      - "8021:8001"
+    networks:
+      - edge-network
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test: ["CMD", "kong", "health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Microservicii proprii ─────────────────────────────────────────────────
+
+  # Auth Service - verificare JWT + proxy token Keycloak
+  auth-service:
+    image: eventflow/auth-service:latest
+    environment:
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-eventflow}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-eventflow-api}
+      KEYCLOAK_CLIENT_SECRET: ${KEYCLOAK_CLIENT_SECRET:-}
+      PORT: 3003
+    ports:
+      - "3003:3003"
+    networks:
+      - internal-network
+    deploy:
+      replicas: 2
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3003/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # User Profile Service
   user-profile-service:
     image: eventflow/user-profile-service:latest
     environment:
@@ -112,7 +209,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # Ticketing Service (Python)
+  # Ticketing Service (cu rate limiting Redis + caching + 2 replici)
   ticketing-service:
     image: eventflow/ticketing-service:latest
     environment:
@@ -147,40 +244,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # RabbitMQ pentru notificări
-  rabbitmq:
-    image: rabbitmq:3.13-management
-    environment:
-      RABBITMQ_DEFAULT_USER: guest
-      RABBITMQ_DEFAULT_PASS: guest
-    ports:
-      - "5678:5672"
-      - "15678:15672"
-    networks:
-      - internal-network
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      placement:
-        constraints:
-          - node.role == manager
-
-  # Redis - storage partajat pentru rate limiting distribuit
-  redis:
-    image: redis:7-alpine
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
-    networks:
-      - internal-network
-    deploy:
-      replicas: 1
-      restart_policy:
-        condition: on-failure
-      placement:
-        constraints:
-          - node.role == manager
-
-  # Notification Service
+  # Notification Service - consumer RabbitMQ + REST
   notification-service:
     image: eventflow/notification-service:latest
     environment:
@@ -191,6 +255,7 @@ services:
       KEYCLOAK_PUBLIC_URL: http://localhost:8080
       PORT: 3006
       RABBITMQ_URL: amqp://guest:guest@rabbitmq:5672/
+      RABBITMQ_HOST: rabbitmq
     ports:
       - "3006:3006"
     networks:
@@ -237,6 +302,7 @@ services:
       KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-eventflow-api}
       PORT: 3008
       RABBITMQ_HOST: rabbitmq
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "3008:3008"
     networks:
@@ -249,15 +315,155 @@ services:
         constraints:
           - node.role == manager
 
+  # Data Service - agregare date cross-servicii
+  data-service:
+    image: eventflow/data-service:latest
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-eventflow}:${POSTGRES_PASSWORD:-eventflow}@postgres:5432/${POSTGRES_DB:-eventflow}
+      KEYCLOAK_URL: http://keycloak:8080
+      KEYCLOAK_PUBLIC_URL: http://localhost:8080
+      KEYCLOAK_REALM: ${KEYCLOAK_REALM:-eventflow}
+      KEYCLOAK_CLIENT_ID: ${KEYCLOAK_CLIENT_ID:-eventflow-api}
+      PORT: 3009
+    ports:
+      - "3009:3009"
+    networks:
+      - internal-network
+      - data-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:3009/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ─── Support Services ──────────────────────────────────────────────────────
+
+  # pgAdmin 4 - administrare PostgreSQL
+  pgadmin:
+    image: dpage/pgadmin4:8.6
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@eventflow.local}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
+      PGADMIN_LISTEN_PORT: 5059
+    ports:
+      - "5059:5059"
+    volumes:
+      - pgadmin-data:/var/lib/pgadmin
+    networks:
+      - db-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  # Portainer - Docker Swarm management UI
+  portainer:
+    image: portainer/portainer-ce:2.21.0
+    command: -H unix:///var/run/docker.sock
+    ports:
+      - "9000:9000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    networks:
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  # ─── Monitoring ────────────────────────────────────────────────────────────
+
+  # Prometheus - colectare metrici
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    networks:
+      - monitoring-network
+      - internal-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
+  # Grafana - dashboarduri monitorizare
+  grafana:
+    image: grafana/grafana:11.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_HTTP_PORT: "3000"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+    networks:
+      - monitoring-network
+    deploy:
+      replicas: 1
+      restart_policy:
+        condition: on-failure
+      placement:
+        constraints:
+          - node.role == manager
+
 volumes:
   postgres-data:
     driver: local
   keycloak-db-data:
     driver: local
+  pgadmin-data:
+    driver: local
+  portainer-data:
+    driver: local
+  prometheus-data:
+    driver: local
+  grafana-data:
+    driver: local
 
 networks:
-  data-network:
+  # Trafic extern: Client → Kong
+  edge-network:
     external: true
+
+  # Comunicare internă între microservicii
   internal-network:
     external: true
 
+  # Acces date: microservicii → PostgreSQL
+  data-network:
+    external: true
+
+  # Rețea DB: PostgreSQL + pgAdmin (izolată)
+  db-network:
+    external: true
+
+  # Monitorizare: Prometheus + Grafana
+  monitoring-network:
+    external: true
