@@ -1,0 +1,70 @@
+_format_version: "3.0"
+_transform: true
+
+# Kong API Gateway - declarative config (DB-less mode)
+# Routează traficul de la clienti la microserviciile EventFlow.
+# Portul extern: 8020 → Kong 8000 intern.
+
+services:
+  # ── Auth Service ─────────────────────────────────────────────────────────
+  - name: auth-service
+    url: http://auth-service:3003
+    routes:
+      - name: auth-route
+        paths:
+          - /api/auth
+        strip_path: true
+
+  # ── User Profile Service ──────────────────────────────────────────────────
+  - name: user-profile-service
+    url: http://user-profile-service:3004
+    routes:
+      - name: profile-route
+        paths:
+          - /api/profile
+        strip_path: true
+
+  # ── Ticketing Service ─────────────────────────────────────────────────────
+  - name: ticketing-service
+    url: http://ticketing-service:3005
+    routes:
+      - name: tickets-route
+        paths:
+          - /api/tickets
+        strip_path: true
+
+  # ── Notification Service ──────────────────────────────────────────────────
+  - name: notification-service
+    url: http://notification-service:3006
+    routes:
+      - name: notify-route
+        paths:
+          - /api/notify
+        strip_path: true
+
+  # ── Gate Service ──────────────────────────────────────────────────────────
+  - name: gate-service
+    url: http://gate-service:3007
+    routes:
+      - name: gate-route
+        paths:
+          - /api/gate
+        strip_path: true
+
+  # ── Payment Service ───────────────────────────────────────────────────────
+  - name: payment-service
+    url: http://payment-service:3008
+    routes:
+      - name: payment-route
+        paths:
+          - /api/pay
+        strip_path: true
+
+  # ── Data Service ──────────────────────────────────────────────────────────
+  - name: data-service
+    url: http://data-service:3009
+    routes:
+      - name: data-route
+        paths:
+          - /api/data
+        strip_path: true

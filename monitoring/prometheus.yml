@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Auth Service
+  - job_name: 'auth-service'
+    static_configs:
+      - targets: ['auth-service:3003']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # User Profile Service
+  - job_name: 'user-profile-service'
+    static_configs:
+      - targets: ['user-profile-service:3004']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # Ticketing Service
+  - job_name: 'ticketing-service'
+    static_configs:
+      - targets: ['ticketing-service:3005']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # Notification Service
+  - job_name: 'notification-service'
+    static_configs:
+      - targets: ['notification-service:3006']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # Gate Service
+  - job_name: 'gate-service'
+    static_configs:
+      - targets: ['gate-service:3007']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # Payment Service
+  - job_name: 'payment-service'
+    static_configs:
+      - targets: ['payment-service:3008']
+    metrics_path: '/health'
+    scrape_interval: 30s
+
+  # Data Service
+  - job_name: 'data-service'
+    static_configs:
+      - targets: ['data-service:3009']
+    metrics_path: '/health'
+    scrape_interval: 30s

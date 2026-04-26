@@ -22,6 +22,9 @@ import jwt
 import requests
 import pika
 import secrets
+import redis
+
+from rate_limiter import RedisSlidingWindowRateLimiter, RateLimiterBackendUnavailable
 
 app = Flask(__name__)
 CORS(app)
@@ -37,6 +40,59 @@ KEYCLOAK_REALM = os.getenv('KEYCLOAK_REALM', 'eventflow')
 KEYCLOAK_PUBLIC_URL = os.getenv('KEYCLOAK_PUBLIC_URL', KEYCLOAK_URL)
 
 db = SQLAlchemy(app)
+
+
+def _build_redis_client():
+    redis_url = os.getenv('REDIS_URL', '').strip()
+    if not redis_url:
+        return None
+    return redis.Redis.from_url(
+        redis_url,
+        decode_responses=True,
+        socket_timeout=1,
+        socket_connect_timeout=1,
+    )
+
+
+REDIS_CLIENT = _build_redis_client()
+RATE_LIMITER = RedisSlidingWindowRateLimiter(REDIS_CLIENT, prefix='rl:payment') if REDIS_CLIENT else None
+
+
+def rate_limit(max_requests: int = 2, window_seconds: int = 60):
+    """
+    Rate limiting per utilizator (keycloak_sub), sliding window, stored in Redis (distributed).
+    """
+
+    def decorator(f):
+        @wraps(f)
+        def wrapped(*args, **kwargs):
+            user_sub = getattr(request, 'user_sub', None)
+            if not user_sub:
+                return jsonify({'error': 'Missing user context for rate limiting'}), 401
+
+            if RATE_LIMITER is None:
+                return jsonify({'error': 'Rate limiter not configured'}), 503
+
+            scope = request.path
+            key = f"{user_sub}:{scope}"
+
+            try:
+                allowed = RATE_LIMITER.allow(key, max_requests, window_seconds)
+            except RateLimiterBackendUnavailable:
+                return jsonify({'error': 'Rate limiting backend unavailable'}), 503
+
+            if not allowed:
+                return jsonify({
+                    'error': 'Too many requests',
+                    'limit': max_requests,
+                    'window_seconds': window_seconds,
+                }), 429
+
+            return f(*args, **kwargs)
+
+        return wrapped
+
+    return decorator
 
 
 class Event(db.Model):
@@ -159,9 +215,14 @@ def publish_ticket_notification(ticket: Ticket):
         channel = connection.channel()
         channel.queue_declare(queue='ticket_booked', durable=False)
 
+        # Important for organizer notifications:
+        # notification-service filters /notifications by organizer_sub for ORGANIZER users.
+        event = Event.query.get(ticket.event_id)
+        organizer_sub = event.created_by if event else None
+
         payload = {
             'event_id': ticket.event_id,
-            'organizer_sub': None,
+            'organizer_sub': organizer_sub,
             'buyer_sub': ticket.keycloak_sub,
             'code': ticket.code,
             'created_at': datetime.utcnow().isoformat(),
@@ -192,6 +253,7 @@ def _cleanup_expired_sessions():
 
 @app.route('/payments/start', methods=['POST'])
 @verify_token
+@rate_limit(max_requests=2, window_seconds=60)
 def start_payment():
     """
     Creează o sesiune de plată PENDING pentru 2 minute.
